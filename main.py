@@ -5,7 +5,7 @@ import numpy as np
 from djitellopy import Tello
 
 FPS = 60
-SPEED_VERT = 30       # Subida suave
+SPEED_VERT = 15       # Subida suave
 ALT_MIN_TOF = 30      # Altura mínima em cm
 ALT_MAX_TOF = 190     # Altura máxima em cm
 CRITICAL_BATTERY = 20 # Bateria mínima (%)
@@ -50,25 +50,30 @@ class TelloStableInspector:
     def __init__(self):
         pygame.init()
         pygame.font.init()
-        pygame.display.set_caption("Tello - Inspecao Estavel de Fachada (Centro Cravado)")
-        self.width = 960
-        self.height = 720
-        self.screen = pygame.display.set_mode([self.width, self.height])
-        self.font = pygame.font.SysFont("Arial", 16, bold=True)
-        self.font_btn = pygame.font.SysFont("Arial", 18, bold=True)
-        self.font_calib = pygame.font.SysFont("Arial", 20, bold=True)
+        pygame.display.set_caption("Tello - Painel Vertical")
+
+        # Tela 1: Painel em Pé (Vertical: 480 de largura x 800 de altura)
+        self.panel_w = 480
+        self.panel_h = 800
+        self.screen = pygame.display.set_mode([self.panel_w, self.panel_h])
+
+        # Fontes organizadas por tamanho
+        self.font_title = pygame.font.SysFont("Arial", 22, bold=True)
+        self.font_huge = pygame.font.SysFont("Arial", 38, bold=True)
+        self.font_mid = pygame.font.SysFont("Arial", 18, bold=True)
+        self.font_sm = pygame.font.SysFont("Arial", 15)
+        self.font_btn = pygame.font.SysFont("Arial", 22, bold=True)
 
         self.tello = Tello()
         self.state = "IDLE"
-
         self.target_span = TARGET_SPAN
 
-        # PID de Roll com ganhos otimizados para cravar o centro
+        # PID de Roll
         self.pid_roll = RobustPID(kp=0.09, kd=0.035, ki=0.008, output_limits=(-16, 16))
 
-        # Botões
-        self.btn_takeoff = pygame.Rect(30, 640, 200, 45)
-        self.btn_land = pygame.Rect(250, 640, 200, 45)
+        # Botões empilhados verticalmente na base da tela
+        self.btn_takeoff = pygame.Rect(40, 630, 400, 65)
+        self.btn_land = pygame.Rect(40, 710, 400, 65)
 
         self.last_telemetry_time = 0
         self.battery = 100
@@ -81,10 +86,14 @@ class TelloStableInspector:
         self.filtered_center_x = float(IMG_CENTER_X)
         self.filtered_span = float(TARGET_SPAN)
 
+        # Tela 2: Janela OpenCV para Câmera e Fachada
+        self.cv_window_name = "Tello - Deteccao de Fachada (Camera)"
+        cv2.namedWindow(self.cv_window_name, cv2.WINDOW_AUTOSIZE)
+
         pygame.time.set_timer(pygame.USEREVENT + 1, 1000 // FPS)
 
     def process_vision(self, frame):
-        """Deteta pares de varandas azuis no mesmo andar para medir centro e largura."""
+        """Deteta pares de varandas azuis no mesmo andar para medir centro e largura (RGB Nativo)."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
 
         lower_blue = np.array([100, 110, 50])
@@ -106,7 +115,7 @@ class TelloStableInspector:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
         # Linha central azul (referência da câmara do drone)
-        cv2.line(frame, (IMG_CENTER_X, 0), (IMG_CENTER_X, self.height), (255, 0, 0), 1)
+        cv2.line(frame, (IMG_CENTER_X, 0), (IMG_CENTER_X, 720), (255, 0, 0), 1)
 
         best_pair = None
         min_y_diff = float("inf")
@@ -151,48 +160,95 @@ class TelloStableInspector:
 
         return frame
 
-    def draw_hud(self, tof_dist, cmd_roll, cmd_pitch):
-        overlay = pygame.Surface((self.width, 50), pygame.SRCALPHA)
-        overlay.fill((20, 20, 20, 200))
-        self.screen.blit(overlay, (0, 0))
+    def draw_battery_icon_vertical(self, surface, x, y, width=70, height=120):
+        """Renderiza um ícone de bateria vertical grande com nível proporcional."""
+        terminal_w = width // 2
+        terminal_h = 10
+        term_x = x + (width - terminal_w) // 2
+        pygame.draw.rect(surface, (200, 200, 200), (term_x, y, terminal_w, terminal_h), border_radius=3)
 
-        # Bateria
-        bat_color = (0, 230, 0) if self.battery > 40 else ((255, 180, 0) if self.battery > CRITICAL_BATTERY else (255, 50, 50))
-        pygame.draw.rect(self.screen, (200, 200, 200), (20, 15, 36, 18), 2, border_radius=3)
-        pygame.draw.rect(self.screen, (200, 200, 200), (56, 19, 3, 10))
-        fill_w = max(0, int((min(self.battery, 100) / 100.0) * 32))
-        pygame.draw.rect(self.screen, bat_color, (22, 17, fill_w, 14), border_radius=2)
-        self.screen.blit(self.font.render(f"{self.battery}%", True, (240, 240, 240)), (68, 15))
+        body_y = y + terminal_h
+        body_h = height - terminal_h
+        pygame.draw.rect(surface, (230, 230, 230), (x, body_y, width, body_h), 3, border_radius=8)
 
-        # Altitude
-        self.screen.blit(self.font.render(f"Alt: {tof_dist} cm", True, (0, 220, 255)), (145, 15))
+        pct = max(0.0, min(float(self.battery) / 100.0, 1.0))
+        fill_max_h = body_h - 10
+        fill_h = int(fill_max_h * pct)
+        fill_y = (body_y + body_h - 5) - fill_h
 
-        # Telemetria do Alvo
+        color = (0, 230, 90) if self.battery > 40 else ((255, 175, 0) if self.battery > CRITICAL_BATTERY else (240, 50, 50))
+        if fill_h > 0:
+            pygame.draw.rect(surface, color, (x + 5, fill_y, width - 10, fill_h), border_radius=5)
+
+    def draw_thermometer_icon_vertical(self, surface, x, y, width=46, height=120):
+        """Renderiza um termômetro vertical grande com bulbo na base."""
+        tube_w = width // 2
+        tube_x = x + (width - tube_w) // 2
+        bulb_radius = width // 2
+        bulb_center = (x + width // 2, y + height - bulb_radius)
+        tube_h = height - bulb_radius * 2
+
+        pygame.draw.rect(surface, (230, 230, 230), (tube_x, y, tube_w, tube_h), 3, border_radius=6)
+        pygame.draw.circle(surface, (230, 230, 230), bulb_center, bulb_radius, 3)
+
+        temp_clamped = max(20.0, min(float(self.temperature), 90.0))
+        pct = (temp_clamped - 20.0) / 70.0
+        fill_h = int(tube_h * pct)
+
+        col = (0, 200, 255) if self.temperature < 60 else ((255, 160, 0) if self.temperature < 75 else (240, 50, 50))
+        pygame.draw.circle(surface, col, bulb_center, bulb_radius - 3)
+
+        if fill_h > 0:
+            pygame.draw.rect(surface, col, (tube_x + 3, (y + tube_h) - fill_h, tube_w - 6, fill_h))
+
+    def draw_vertical_panel(self, tof_dist, cmd_roll, cmd_pitch):
+        self.screen.fill((18, 22, 28))
+
+        # 1. Título do Painel
+        title_surf = self.font_title.render("CONTROLE & TELEMETRIA", True, (240, 240, 240))
+        self.screen.blit(title_surf, (self.panel_w // 2 - title_surf.get_width() // 2, 20))
+
+        # 2. Card de Bateria Vertical (Grande)
+        card_bat = pygame.Rect(30, 60, 420, 145)
+        pygame.draw.rect(self.screen, (28, 34, 44), card_bat, border_radius=12)
+        self.draw_battery_icon_vertical(self.screen, 60, 72, width=65, height=120)
+        self.screen.blit(self.font_mid.render("NÍVEL DA BATERIA", True, (160, 175, 195)), (155, 95))
+        self.screen.blit(self.font_huge.render(f"{self.battery}%", True, (255, 255, 255)), (155, 125))
+
+        # 3. Card de Temperatura Vertical (Grande)
+        card_temp = pygame.Rect(30, 220, 420, 145)
+        pygame.draw.rect(self.screen, (28, 34, 44), card_temp, border_radius=12)
+        self.draw_thermometer_icon_vertical(self.screen, 70, 232, width=46, height=120)
+        self.screen.blit(self.font_mid.render("TEMPERATURA INTERNA", True, (160, 175, 195)), (155, 255))
+        self.screen.blit(self.font_huge.render(f"{self.temperature}°C", True, (255, 255, 255)), (155, 285))
+
+        # 4. Status de Voo, ToF e Alvo
+        card_status = pygame.Rect(30, 380, 420, 225)
+        pygame.draw.rect(self.screen, (25, 30, 40), card_status, border_radius=12)
+
         lock_txt = "BLOQUEADO" if self.target_locked else "A PROCURAR"
-        lock_col = (0, 255, 0) if self.target_locked else (255, 120, 0)
-        self.screen.blit(self.font.render(f"Alvo: {lock_txt}", True, lock_col), (270, 15))
-        self.screen.blit(self.font.render(f"R:{cmd_roll} | P:{cmd_pitch}", True, (255, 215, 0)), (450, 15))
-        self.screen.blit(self.font.render(f"FSM: {self.state}", True, (200, 200, 200)), (680, 15))
+        lock_col = (0, 255, 120) if self.target_locked else (255, 140, 0)
 
-        if self.state == "IDLE":
-            banner = pygame.Surface((self.width - 60, 55), pygame.SRCALPHA)
-            banner.fill((10, 10, 10, 215))
-            self.screen.blit(banner, (30, 60))
-            pygame.draw.rect(self.screen, (255, 215, 0), (30, 60, self.width - 60, 55), 2, border_radius=5)
+        self.screen.blit(self.font_mid.render(f"FSM: {self.state}", True, (255, 215, 0)), (50, 395))
+        self.screen.blit(self.font_mid.render(f"Altitude ToF: {tof_dist} cm", True, (0, 220, 255)), (50, 430))
+        self.screen.blit(self.font_mid.render("Alvo Fachada: ", True, (200, 200, 200)), (50, 465))
+        self.screen.blit(self.font_mid.render(lock_txt, True, lock_col), (180, 465))
+        self.screen.blit(self.font_mid.render(f"Largura Atual: {self.current_span} px", True, (220, 220, 220)), (50, 500))
+        self.screen.blit(self.font_mid.render(f"Largura Alvo: {self.target_span} px  ([+]/[-])", True, (255, 220, 0)), (50, 535))
+        self.screen.blit(self.font_sm.render(f"Comandos Ativos: Roll = {cmd_roll} | Pitch = {cmd_pitch}", True, (150, 160, 175)), (50, 575))
 
-            calib_msg = f"DISTANCIA:  Atual: {self.current_span} px   |   Alvo: {self.target_span} px"
-            self.screen.blit(self.font_calib.render(calib_msg, True, (255, 255, 0)), (45, 68))
-            self.screen.blit(self.font.render("Use [+] e [-] para alterar o Alvo se necessario.", True, (200, 200, 200)), (45, 93))
+        # 5. Botão Decolar / Iniciar
+        takeoff_bg = (0, 170, 70) if self.state == "IDLE" else (50, 55, 60)
+        pygame.draw.rect(self.screen, takeoff_bg, self.btn_takeoff, border_radius=12)
+        pygame.draw.rect(self.screen, (255, 255, 255), self.btn_takeoff, 2, border_radius=12)
+        lbl_to = self.font_btn.render("DECOLAR / INICIAR", True, (255, 255, 255))
+        self.screen.blit(lbl_to, (self.btn_takeoff.centerx - lbl_to.get_width() // 2, self.btn_takeoff.centery - lbl_to.get_height() // 2))
 
-        # Botões
-        takeoff_color = (0, 170, 70) if self.state == "IDLE" else (60, 60, 60)
-        pygame.draw.rect(self.screen, takeoff_color, self.btn_takeoff, border_radius=8)
-        pygame.draw.rect(self.screen, (255, 255, 255), self.btn_takeoff, 2, border_radius=8)
-        self.screen.blit(self.font_btn.render("DECOLAR / INICIAR", True, (255, 255, 255)), (self.btn_takeoff.x + 14, self.btn_takeoff.y + 12))
-
-        pygame.draw.rect(self.screen, (210, 40, 40), self.btn_land, border_radius=8)
-        pygame.draw.rect(self.screen, (255, 255, 255), self.btn_land, 2, border_radius=8)
-        self.screen.blit(self.font_btn.render("POUSAR / PARAR", True, (255, 255, 255)), (self.btn_land.x + 22, self.btn_land.y + 12))
+        # 6. Botão Pousar / Parar
+        pygame.draw.rect(self.screen, (215, 40, 40), self.btn_land, border_radius=12)
+        pygame.draw.rect(self.screen, (255, 255, 255), self.btn_land, 2, border_radius=12)
+        lbl_ld = self.font_btn.render("POUSAR / PARAR", True, (255, 255, 255))
+        self.screen.blit(lbl_ld, (self.btn_land.centerx - lbl_ld.get_width() // 2, self.btn_land.centery - lbl_ld.get_height() // 2))
 
     def trigger_takeoff(self):
         if self.battery <= CRITICAL_BATTERY:
@@ -265,17 +321,20 @@ class TelloStableInspector:
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_m):
                         self.target_span = max(100, self.target_span - 10)
 
+            # Tela 2: Exibição da Câmera no OpenCV (Convertido RGB -> BGR para preservar as cores reais)
             frame = frame_read.frame
             if frame is not None:
                 annotated_frame = self.process_vision(frame.copy())
-                display_frame = np.rot90(annotated_frame)
-                display_frame = np.flipud(display_frame)
-                self.screen.blit(pygame.surfarray.make_surface(display_frame), (0, 0))
+                bgr_display = cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow(self.cv_window_name, bgr_display)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    running = False
 
-                tof_dist = self.tello.get_distance_tof()
-                self.draw_hud(tof_dist, cmd_roll, cmd_pitch)
+            # Tela 1: Renderização do Painel Vertical em Pygame (480 x 800)
+            tof_dist = self.tello.get_distance_tof()
+            self.draw_vertical_panel(tof_dist, cmd_roll, cmd_pitch)
+            pygame.display.flip()
 
-            pygame.display.update()
             time.sleep(1 / FPS)
 
         self.tello.send_rc_control(0, 0, 0, 0)
@@ -284,6 +343,7 @@ class TelloStableInspector:
         except Exception:
             pass
         self.tello.streamoff()
+        cv2.destroyAllWindows()
         pygame.quit()
 
     def control_loop(self):
@@ -294,7 +354,6 @@ class TelloStableInspector:
         if tof <= 0:
             tof = 180
 
-        # Subida / Descida via sensor ToF
         cmd_vert = 0
         if self.state == "ASCENDING":
             if tof >= ALT_MAX_TOF:
@@ -313,21 +372,16 @@ class TelloStableInspector:
         cmd_pitch = 0
 
         if self.target_locked:
-            # 1. ROLL (Lateral):
-            # Deadband reduzida para 6 px para cravar no centro geométrico
             error_x = self.building_center_x - IMG_CENTER_X
             if abs(error_x) > 6:
                 cmd_roll = self.pid_roll.compute(error_x)
             else:
                 cmd_roll = 0
 
-            # 2. PITCH (Distância frontal rigorosa):
             diff_span = self.current_span - self.target_span
             if diff_span > 20:
-                # Muito perto -> recua
                 cmd_pitch = -7 if diff_span < 50 else -12
             elif diff_span < -20:
-                # Muito longe -> avança
                 cmd_pitch = 6 if diff_span > -50 else 9
             else:
                 cmd_pitch = 0
