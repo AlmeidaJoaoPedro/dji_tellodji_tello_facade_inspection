@@ -19,7 +19,7 @@ CRITICAL_BATTERY = 20 # Bateria mínima (%)
 
 IMG_CENTER_X = 960 // 2
 TARGET_SPAN = 600
-TELLO_SSID = "TELLO-CFA 143"
+TELLO_SSID = "TELLO-CFA143"  # nome exato da rede (sem espaço), igual ao perfil salvo no NetworkManager
 
 # Coordenadas do layout do kanshi (~/.config/kanshi/config). O posicionamento final e a
 # tela cheia são garantidos pelas windowRules do labwc (~/.config/labwc/rc.xml), que movem
@@ -121,10 +121,14 @@ class TelloStableInspector:
         pygame.font.init()
         pygame.display.set_caption("Tello - Painel Vertical")
 
-        # Tela 1: Raspberry Touchscreen (480x800 em X=1920, Y=231)
+        # Tela 1: Raspberry Touchscreen - abre em tela cheia pela windowRule do labwc (F11 alterna
+        # para janela). A janela é redimensionável e o painel é desenhado
+        # numa superfície fixa 480x800 e escalado para caber na janela (botões nunca cortam).
         self.panel_w = RASP_WIDTH
         self.panel_h = RASP_HEIGHT
-        self.screen = pygame.display.set_mode([self.panel_w, self.panel_h], pygame.NOFRAME)
+        pygame.display.set_mode([self.panel_w, self.panel_h], pygame.RESIZABLE)
+        self.screen = pygame.Surface((self.panel_w, self.panel_h))
+        self.view_rect = pygame.Rect(0, 0, self.panel_w, self.panel_h)
 
         # Tipografia
         self.font_title = pygame.font.SysFont("Arial", 20, bold=True)
@@ -136,6 +140,7 @@ class TelloStableInspector:
         self.tello = None
         self.frame_read = None
         self.is_connected = False
+        self.connecting = False
         self.state = "IDLE"
         self.target_span = TARGET_SPAN
 
@@ -158,51 +163,95 @@ class TelloStableInspector:
         self.filtered_center_x = float(IMG_CENTER_X)
         self.filtered_span = float(TARGET_SPAN)
 
-        # Tela 2: Janela OpenCV para Câmera no Monitor Principal (HDMI-A-1) em Tela Cheia
+        # Tela 2: Janela OpenCV para Câmera no Monitor Principal (HDMI-A-1) em tela cheia.
+        # A windowRule do labwc leva a janela para o HDMI; F11 alterna tela cheia / janela.
         self.cv_window_name = "Tello - Deteccao de Fachada (Camera)"
         # GUI_NORMAL remove a barra de ferramentas/status do Qt que aparecia sobre a imagem
         cv2.namedWindow(self.cv_window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-        cv2.moveWindow(self.cv_window_name, MONITOR_POS_X, MONITOR_POS_Y)
+        cv2.resizeWindow(self.cv_window_name, 960, 720)
+        # Margem para a barra de título e a barra de tarefas não ficarem fora da tela
+        cv2.moveWindow(self.cv_window_name, MONITOR_POS_X + 60, MONITOR_POS_Y + 80)
         cv2.setWindowProperty(self.cv_window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         pygame.time.set_timer(pygame.USEREVENT + 1, 1000 // FPS)
 
-        # Conectar ao drone na inicialização
-        self.connect_drone()
+        # Conectar ao drone na inicialização (em segundo plano, a interface continua respondendo)
+        self.start_connect()
 
-    def ensure_wifi_connection(self):
-        """Verifica se está no Wi-Fi do Tello via nmcli; se não estiver, reconecta."""
+    def present_panel(self):
+        """Escala o painel 480x800 para o tamanho atual da janela, mantendo a proporção."""
+        window = pygame.display.get_surface()
+        win_w, win_h = window.get_size()
+        scale = min(win_w / self.panel_w, win_h / self.panel_h)
+        view_w, view_h = int(self.panel_w * scale), int(self.panel_h * scale)
+        self.view_rect = pygame.Rect((win_w - view_w) // 2, (win_h - view_h) // 2, view_w, view_h)
+        window.fill((18, 22, 28))
+        if (view_w, view_h) == (self.panel_w, self.panel_h):
+            window.blit(self.screen, self.view_rect)
+        else:
+            window.blit(pygame.transform.smoothscale(self.screen, (view_w, view_h)), self.view_rect)
+        pygame.display.flip()
+
+    def to_panel_coords(self, pos):
+        """Converte um toque/clique na janela para coordenadas do painel 480x800."""
+        r = self.view_rect
+        return (int((pos[0] - r.x) * self.panel_w / r.w), int((pos[1] - r.y) * self.panel_h / r.h))
+
+    def start_connect(self):
+        """Dispara a conexão (Wi-Fi + Tello) numa thread para não congelar a interface."""
+        if self.connecting:
+            return
+        self.connecting = True
+        threading.Thread(target=self._connect_worker, daemon=True).start()
+
+    def _connect_worker(self):
         try:
-            current_wifi = subprocess.check_output(
-                ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"], 
-                stderr=subprocess.DEVNULL
-            ).decode("utf-8")
-            
-            for line in current_wifi.splitlines():
-                if line.startswith("yes:"):
-                    active_ssid = line.split(":")[1].strip()
-                    if TELLO_SSID in active_ssid or active_ssid in TELLO_SSID:
-                        self.wifi_status_msg = f"Wi-Fi OK: {active_ssid}"
-                        return True
-            
-            self.wifi_status_msg = "Conectando ao Wi-Fi..."
-            self.draw_vertical_panel(0, 0, 0)
-            pygame.display.flip()
+            self.connect_drone()
+        finally:
+            self.connecting = False
 
-            res = subprocess.run(
-                ["nmcli", "dev", "wifi", "connect", TELLO_SSID], 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
-                text=True, 
-                timeout=10
-            )
-            time.sleep(2)
-            if res.returncode == 0:
+    def active_wifi_ssid(self):
+        out = subprocess.run(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+                             capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            if line.startswith("yes:"):
+                return line.split(":", 1)[1].strip()
+        return ""
+
+    def ensure_wifi_connection(self, attempts=3):
+        """Garante o Wi-Fi do Tello via nmcli: força nova busca de redes, dá tempo real para
+        associar + DHCP e registra o erro exato do nmcli no log."""
+        try:
+            if self.active_wifi_ssid() == TELLO_SSID:
                 self.wifi_status_msg = f"Wi-Fi OK: {TELLO_SSID}"
                 return True
-            else:
-                self.wifi_status_msg = "Falha no Wi-Fi"
-                return False
+
+            for attempt in range(1, attempts + 1):
+                self.wifi_status_msg = f"Procurando {TELLO_SSID} ({attempt}/{attempts})..."
+                # A rede do Tello só aparece depois que o drone liga; sem rescan o nmcli
+                # usa a lista antiga e responde "No network with SSID ... found".
+                subprocess.run(["nmcli", "dev", "wifi", "rescan", "ssid", TELLO_SSID],
+                               capture_output=True, text=True, timeout=15)
+                time.sleep(3)
+
+                self.wifi_status_msg = f"Conectando ao Wi-Fi ({attempt}/{attempts})..."
+                res = subprocess.run(["nmcli", "--wait", "40", "dev", "wifi", "connect", TELLO_SSID],
+                                     capture_output=True, text=True, timeout=45)
+                if res.returncode == 0:
+                    time.sleep(1)
+                    self.wifi_status_msg = f"Wi-Fi OK: {TELLO_SSID}"
+                    print(f"[WIFI] Conectado a {TELLO_SSID}")
+                    return True
+                erro = (res.stderr or res.stdout).strip()
+                print(f"[WIFI] Tentativa {attempt}/{attempts} falhou: {erro}")
+                if "No network" in erro:
+                    self.wifi_status_msg = "Tello nao encontrado. Drone ligado?"
+                elif "Secrets" in erro or "password" in erro.lower():
+                    self.wifi_status_msg = "Wi-Fi do Tello pediu senha"
+                else:
+                    self.wifi_status_msg = f"Wi-Fi falhou: {erro[:24]}"
+                time.sleep(2)
+            return False
         except Exception as e:
             self.wifi_status_msg = "Erro nmcli / Wi-Fi"
             print(f"[WIFI] Erro: {e}")
@@ -210,11 +259,12 @@ class TelloStableInspector:
 
     def connect_drone(self):
         """Reinicia os sockets UDP e reconecta ao Tello após troca de bateria."""
+        self.is_connected = False
         self.wifi_status_msg = "Checando Wi-Fi..."
-        self.draw_vertical_panel(0, 0, 0)
-        pygame.display.flip()
 
-        self.ensure_wifi_connection()
+        if not self.ensure_wifi_connection():
+            print("[SISTEMA] Sem Wi-Fi do Tello; conexão com o drone não foi tentada.")
+            return
 
         if self.tello is not None:
             try:
@@ -227,8 +277,16 @@ class TelloStableInspector:
         print("[SISTEMA] Conectando ao SDK Tello...")
         self.wifi_status_msg = "Conectando Tello..."
         try:
-            self.tello = Tello()
-            self.tello.connect(wait_for_state=False)
+            tello = Tello()
+            tello.connect(wait_for_state=False)
+        except Exception as e:
+            self.wifi_status_msg = "Drone nao respondeu (SDK)"
+            print(f"[ERRO] Falha de conexão (comando SDK): {e}")
+            return
+        self.tello = tello
+
+        self.wifi_status_msg = "Iniciando video..."
+        try:
             time.sleep(0.5)
             self.tello.streamoff()
             self.tello.streamon()
@@ -236,13 +294,14 @@ class TelloStableInspector:
             # numa reconexão ele é reaproveitado e volta a decodificar quando o vídeo retorna.
             if self.frame_read is None or not self.frame_read.worker.is_alive():
                 self.frame_read = LowLatencyFrameReader(self.tello.get_udp_video_address())
-            self.is_connected = True
-            self.wifi_status_msg = "Drone Pronto!"
-            print("[SISTEMA] Drone conectado com sucesso!")
         except Exception as e:
-            self.is_connected = False
-            self.wifi_status_msg = "Falha conexao Tello"
-            print(f"[ERRO] Falha de conexão: {e}")
+            self.wifi_status_msg = "Falha no video do Tello"
+            print(f"[ERRO] Falha ao iniciar o vídeo: {e}")
+            return
+
+        self.is_connected = True
+        self.wifi_status_msg = "Drone Pronto!"
+        print("[SISTEMA] Drone conectado com sucesso!")
 
     def process_vision(self, frame):
         """Deteta pares de varandas azuis no mesmo andar para medir centro e largura (RGB Nativo)."""
@@ -460,12 +519,15 @@ class TelloStableInspector:
                     cmd_roll, cmd_pitch = self.control_loop()
                 elif event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.VIDEORESIZE:
+                    last_panel_time = 0  # redesenha já no novo tamanho
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.btn_reconnect.collidepoint(event.pos):
-                        self.connect_drone()
-                    elif self.btn_takeoff.collidepoint(event.pos):
+                    pos = self.to_panel_coords(event.pos)
+                    if self.btn_reconnect.collidepoint(pos):
+                        self.start_connect()
+                    elif self.btn_takeoff.collidepoint(pos):
                         self.trigger_takeoff()
-                    elif self.btn_land.collidepoint(event.pos):
+                    elif self.btn_land.collidepoint(pos):
                         self.trigger_land(reason="Botão Pousar")
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -473,7 +535,7 @@ class TelloStableInspector:
                     elif event.key == pygame.K_SPACE:
                         self.trigger_takeoff()
                     elif event.key == pygame.K_r:
-                        self.connect_drone()
+                        self.start_connect()
                     elif event.key == pygame.K_l:
                         self.trigger_land(reason="Tecla L")
                     elif event.key in (pygame.K_PLUS, pygame.K_KP_PLUS, pygame.K_p):
@@ -506,7 +568,7 @@ class TelloStableInspector:
                 last_panel_time = current_time
                 tof_dist = self.tello.get_distance_tof() if (self.is_connected and self.tello) else 0
                 self.draw_vertical_panel(tof_dist, cmd_roll, cmd_pitch)
-                pygame.display.flip()
+                self.present_panel()
 
             # Sem sleep fixo: só cede a CPU quando ainda não chegou quadro novo
             if not new_frame:
