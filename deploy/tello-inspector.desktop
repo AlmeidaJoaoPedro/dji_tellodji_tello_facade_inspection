@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Tello Facade Inspector
+Comment=Inicia a central de controle do Tello no boot
+Exec=/home/tello/dji_tellodji_tello_facade_inspection/start_tello.sh
+X-GNOME-Autostart-enabled=true

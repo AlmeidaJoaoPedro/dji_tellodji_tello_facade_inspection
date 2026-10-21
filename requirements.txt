@@ -1,0 +1,6 @@
+# Versões testadas no Raspberry Pi 4 (Raspberry Pi OS 64-bit / Debian 13, Python 3.13)
+djitellopy==2.5.0
+av==14.2.0
+opencv-python==5.0.0.93
+pygame==2.6.1
+numpy==2.2.4
